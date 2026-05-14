@@ -7,6 +7,7 @@ import '../../core/constants/app_constants.dart';
 import '../../core/services/storage_service.dart';
 import '../../core/services/api_service.dart';
 import '../../core/services/voice_service.dart';
+import '../../core/utils/permission_helper.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({Key? key}) : super(key: key);
@@ -23,24 +24,25 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _initializeApp() async {
-    // Wait a bit to show the splash screen
+    // Request all permissions on very first launch
+    await PermissionHelper.requestAllPermissions();
+
     await Future.delayed(const Duration(seconds: 2));
-    
+
     if (!mounted) return;
-    
+
     final storage = context.read<StorageService>();
     final api = context.read<ApiService>();
-    
-    // Initialize Voice Service model in background (can take time)
+
+    // Initialize Voice Service model in background
     context.read<VoiceService>().initialize();
 
     final isConfigured = storage.getBool(AppConstants.prefsBackendConfigured);
-    
+
     if (isConfigured) {
       final ip = storage.getString(AppConstants.prefsBackendIp) ?? '';
       final port = storage.getString(AppConstants.prefsBackendPort) ?? AppConstants.defaultPort;
       api.initialize('http://$ip:$port');
-      
       context.go('/home');
     } else {
       context.go('/setup');

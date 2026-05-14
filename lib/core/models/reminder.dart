@@ -26,4 +26,27 @@ class Reminder extends HiveObject {
     this.repeatPattern = 'once',
     this.isActive = true,
   });
+
+  factory Reminder.fromJson(Map<String, dynamic> json) {
+    return Reminder(
+      id: json['id'] ?? '',
+      title: json['message'] ?? json['title'] ?? '',
+      time: DateTime.tryParse(json['trigger_at'] ?? json['time'] ?? '') ?? DateTime.now(),
+      repeatPattern: json['repeat'] ?? json['repeatPattern'] ?? 'once',
+      isActive: json['is_active'] ?? json['isActive'] ?? true,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'message': title,
+      'time': time.toIso8601String(),
+      'trigger_at': time.toIso8601String(),
+      'repeatPattern': repeatPattern,
+      'repeat': repeatPattern,
+      'isActive': isActive,
+    };
+  }
 }

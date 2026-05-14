@@ -24,7 +24,12 @@ class VoiceService {
   bool get isInitialized => _isInitialized;
 
   Timer? _silenceTimer;
+  Timer? _safetyTimer;
   bool _isListening = false;
+  String _currentTranscript = "";
+  
+  StreamSubscription? _partialSub;
+  StreamSubscription? _resultSub;
 
   Future<bool> initialize({Function(double)? onProgress}) async {
     if (_isInitialized) return true;
@@ -38,7 +43,7 @@ class VoiceService {
       _isInitialized = true;
       return true;
     } catch (e) {
-      print("Failed to initialize Vosk: $e");
+      print("[VoiceService] Failed to initialize Vosk: $e");
       return false;
     }
   }
@@ -51,7 +56,6 @@ class VoiceService {
       return modelDir.path;
     }
 
-    // Download model
     try {
       final zipPath = '${docsDir.path}/model.zip';
       final dio = Dio();
@@ -65,7 +69,6 @@ class VoiceService {
         },
       );
 
-      // Unzip
       final bytes = File(zipPath).readAsBytesSync();
       final archive = ZipDecoder().decodeBytes(bytes);
       for (final file in archive) {
@@ -83,7 +86,7 @@ class VoiceService {
       File(zipPath).deleteSync();
       return modelDir.path;
     } catch (e) {
-      print("Failed to download model: $e");
+      print("[VoiceService] Failed to download model: $e");
       return null;
     }
   }
@@ -92,43 +95,71 @@ class VoiceService {
     if (!_isInitialized || _recognizer == null) return false;
     
     if (await Permission.microphone.request() != PermissionStatus.granted) {
+      print("[VoiceService] Microphone permission denied");
       return false;
     }
+
+    if (_isListening) await stopListening();
 
     try {
       _speechService = await _vosk.initSpeechService(_recognizer!);
       
-      _speechService!.onPartial().listen((event) {
-        final Map<String, dynamic> data = jsonDecode(event);
-        final String text = data['partial'] ?? "";
-        if (text.isNotEmpty) {
-          _partialResultsController.add(text);
-          _resetSilenceTimer();
+      _partialSub = _speechService!.onPartial().listen((event) {
+        try {
+          final Map<String, dynamic> data = jsonDecode(event);
+          final String text = data['partial'] ?? "";
+          if (text.isNotEmpty) {
+            print("[VoiceService] Partial: $text");
+            _currentTranscript = text;
+            _partialResultsController.add(text);
+            _resetSilenceTimer();
+          }
+        } catch (e) {
+          print("[VoiceService] Partial Error: $e");
         }
       });
 
-      _speechService!.onResult().listen((event) {
-        final Map<String, dynamic> data = jsonDecode(event);
-        final String text = data['text'] ?? "";
-        if (text.isNotEmpty) {
-          _finalResultsController.add(text);
+      _resultSub = _speechService!.onResult().listen((event) {
+        try {
+          final Map<String, dynamic> data = jsonDecode(event);
+          final String text = data['text'] ?? "";
+          print("[VoiceService] Final Result Event: $text");
+          if (text.isNotEmpty) {
+            _currentTranscript = text;
+            _finalResultsController.add(text);
+            stopListening();
+          }
+        } catch (e) {
+          print("[VoiceService] Result Error: $e");
         }
       });
 
       await _speechService!.start();
       _isListening = true;
+      _currentTranscript = "";
+      
       _resetSilenceTimer();
+      
+      _safetyTimer?.cancel();
+      _safetyTimer = Timer(const Duration(seconds: 8), () {
+        if (_isListening) {
+          print("[VoiceService] Safety timeout triggered");
+          stopListening();
+        }
+      });
+
       return true;
     } catch (e) {
-      print("Start listening failed: $e");
+      print("[VoiceService] Start listening failed: $e");
       return false;
     }
   }
 
   void _resetSilenceTimer() {
     _silenceTimer?.cancel();
-    _silenceTimer = Timer(const Duration(seconds: 2), () {
+    _silenceTimer = Timer(const Duration(milliseconds: 1500), () {
       if (_isListening) {
+        print("[VoiceService] Silence detected (1.5s)");
         stopListening();
       }
     });
@@ -136,14 +167,25 @@ class VoiceService {
 
   Future<void> stopListening() async {
     if (!_isListening) return;
+    print("[VoiceService] Stopping speech service...");
+    
     _silenceTimer?.cancel();
+    _safetyTimer?.cancel();
     _isListening = false;
     
+    if (_currentTranscript.isNotEmpty) {
+      _finalResultsController.add(_currentTranscript);
+    } else {
+      _finalResultsController.add("");
+    }
+    
     try {
+      await _partialSub?.cancel();
+      await _resultSub?.cancel();
       await _speechService?.stop();
       _speechService = null;
     } catch (e) {
-      print("Stop listening failed: $e");
+      print("[VoiceService] Stop failed: $e");
     }
   }
 }

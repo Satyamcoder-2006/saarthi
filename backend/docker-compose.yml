@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: saarthi_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    build: .
+    container_name: saarthi_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_BASE_URL=http://host.containers.internal:11434
+      - OLLAMA_MODEL=llama3
+    volumes:
+      - db_data:/app/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  db_data:

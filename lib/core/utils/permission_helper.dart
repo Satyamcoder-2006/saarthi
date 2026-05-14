@@ -1,22 +1,22 @@
 import 'package:permission_handler/permission_handler.dart';
 
 class PermissionHelper {
-  static Future<bool> requestAllPermissions() async {
-    Map<Permission, PermissionStatus> statuses = await [
+  /// Request all permissions the app needs upfront.
+  static Future<void> requestAllPermissions() async {
+    await [
       Permission.microphone,
       Permission.phone,
-      Permission.sms,
+      Permission.contacts,
       Permission.location,
-      Permission.notification,
     ].request();
+  }
 
-    bool allGranted = true;
-    statuses.forEach((permission, status) {
-      if (!status.isGranted) {
-        allGranted = false;
-      }
-    });
-    
-    return allGranted;
+  static Future<bool> hasMicrophonePermission() async {
+    return await Permission.microphone.isGranted;
+  }
+
+  static Future<bool> requestMicrophonePermission() async {
+    final status = await Permission.microphone.request();
+    return status == PermissionStatus.granted;
   }
 }

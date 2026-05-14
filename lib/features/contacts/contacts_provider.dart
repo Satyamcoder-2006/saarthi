@@ -11,29 +11,29 @@ class ContactsProvider extends ChangeNotifier {
 
   List<Contact> _allContacts = [];
   List<Contact> filteredContacts = [];
+  bool isLoading = false;
 
   ContactsProvider({required this.apiService, required this.storageService});
 
   Future<void> loadContacts() async {
-    // 1. Load from local Hive cache
+    // 1. Load from local Hive cache first (instant)
     _allContacts = storageService.contactsBox.values.toList();
     filteredContacts = List.from(_allContacts);
     notifyListeners();
 
-    // 2. Try fetching from backend if connected
+    // 2. Sync from backend if available
     if (apiService.isInitialized) {
       try {
         final serverContacts = await apiService.getContacts();
         if (serverContacts.isNotEmpty) {
           _allContacts = serverContacts;
           filteredContacts = List.from(_allContacts);
-          // Update cache
           await storageService.contactsBox.clear();
           await storageService.contactsBox.addAll(serverContacts);
           notifyListeners();
         }
       } catch (e) {
-        print("Error fetching contacts from server: $e");
+        // Keep local cache if backend fails
       }
     }
   }
@@ -47,27 +47,55 @@ class ContactsProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> addContact(String name, String phone, String? whatsapp, bool isEmergency) async {
+  Future<void> addContact(
+    String name,
+    String phone,
+    String? whatsapp,
+    bool isEmergency,
+  ) async {
+    isLoading = true;
+    notifyListeners();
+
     final contact = Contact(
       id: const Uuid().v4(),
-      name: name,
-      phone: phone,
-      whatsappNumber: whatsapp,
+      name: name.trim(),
+      phone: phone.trim(),
+      whatsappNumber: whatsapp?.trim(),
       isEmergency: isEmergency,
     );
 
     _allContacts.add(contact);
     filteredContacts = List.from(_allContacts);
     await storageService.contactsBox.add(contact);
-    
+
     if (apiService.isInitialized) {
       try {
         await apiService.addContact(contact);
-      } catch (e) {
-        print("Could not sync new contact to server: $e");
-      }
+      } catch (_) {}
     }
-    
+
+    isLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> deleteContact(Contact contact) async {
+    _allContacts.removeWhere((c) => c.id == contact.id);
+    filteredContacts = List.from(_allContacts);
+
+    // Remove from local Hive
+    final key = storageService.contactsBox.keys.firstWhere(
+      (k) => storageService.contactsBox.get(k)?.id == contact.id,
+      orElse: () => null,
+    );
+    if (key != null) await storageService.contactsBox.delete(key);
+
+    // Remove from backend
+    if (apiService.isInitialized) {
+      try {
+        await apiService.deleteContact(contact.id);
+      } catch (_) {}
+    }
+
     notifyListeners();
   }
 }

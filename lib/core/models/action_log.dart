@@ -30,12 +30,14 @@ class ActionLog extends HiveObject {
   factory ActionLog.fromJson(Map<String, dynamic> json) {
     return ActionLog(
       id: json['id'] ?? '',
-      intentType: json['intentType'] ?? 'unknown',
-      description: json['description'] ?? '',
-      isSuccess: json['isSuccess'] ?? false,
-      timestamp: json['timestamp'] != null 
-          ? DateTime.parse(json['timestamp']) 
-          : DateTime.now(),
+      intentType: json['intent'] ?? json['intentType'] ?? 'unknown',
+      description: json['raw_text'] ?? json['description'] ?? '',
+      isSuccess: json['success'] ?? json['isSuccess'] ?? false,
+      timestamp: json['ts'] != null
+          ? DateTime.parse(json['ts'])
+          : json['timestamp'] != null
+              ? DateTime.parse(json['timestamp'])
+              : DateTime.now(),
     );
   }
 }

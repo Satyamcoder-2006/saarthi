@@ -1,8 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:vosk_flutter/vosk_flutter.dart';
+import 'package:vosk_flutter_2/vosk_flutter_2.dart';
 import 'package:dio/dio.dart';
 import 'package:archive/archive.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -98,7 +99,8 @@ class VoiceService {
       _speechService = await _vosk.initSpeechService(_recognizer!);
       
       _speechService!.onPartial().listen((event) {
-        final text = event.partial;
+        final Map<String, dynamic> data = jsonDecode(event);
+        final String text = data['partial'] ?? "";
         if (text.isNotEmpty) {
           _partialResultsController.add(text);
           _resetSilenceTimer();
@@ -106,7 +108,8 @@ class VoiceService {
       });
 
       _speechService!.onResult().listen((event) {
-        final text = event.text;
+        final Map<String, dynamic> data = jsonDecode(event);
+        final String text = data['text'] ?? "";
         if (text.isNotEmpty) {
           _finalResultsController.add(text);
         }

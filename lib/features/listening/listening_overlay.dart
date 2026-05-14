@@ -4,7 +4,7 @@ import 'package:provider/provider.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/services/voice_service.dart';
 import '../../core/services/api_service.dart';
-import '../home_provider.dart';
+import '../home/home_provider.dart';
 import '../confirmation/confirmation_sheet.dart';
 
 class ListeningOverlay extends StatefulWidget {

@@ -1,96 +1,36 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../../../core/constants/app_colors.dart';
-import '../home_provider.dart';
+import '../../listening/listening_provider.dart';
 import '../../listening/listening_overlay.dart';
 
-class MicButton extends StatefulWidget {
-  const MicButton({Key? key}) : super(key: key);
-
-  @override
-  State<MicButton> createState() => _MicButtonState();
-}
-
-class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _animation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    );
-    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+class MicButton extends StatelessWidget {
+  const MicButton({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final isListening = context.select<HomeProvider, bool>((p) => p.isListening);
+    return Consumer<ListeningProvider>(
+      builder: (context, provider, _) {
+        final isActive = provider.pipelineState == PipelineState.listening;
 
-    if (isListening && !_controller.isAnimating) {
-      _controller.repeat(reverse: true);
-    } else if (!isListening && _controller.isAnimating) {
-      _controller.stop();
-      _controller.reset();
-    }
+        return GestureDetector(
+          onTap: () async {
+            // Start listening in provider first
+            provider.startListening();
 
-    return GestureDetector(
-      onTap: () {
-        if (!isListening) {
-          context.read<HomeProvider>().startListening();
-          showGeneralDialog(
-            context: context,
-            barrierDismissible: false,
-            barrierColor: Colors.black.withOpacity(0.94),
-            pageBuilder: (context, anim1, anim2) => const ListeningOverlay(),
-          );
-        }
-      },
-      child: isListening 
-        ? AnimatedBuilder(
-            animation: _animation,
-            builder: (context, child) {
-              return Stack(
-                alignment: Alignment.center,
-                children: [
-                  Container(
-                    width: 160 + (_animation.value * 60),
-                    height: 160 + (_animation.value * 60),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppColors.listeningPulse.withOpacity(0.1),
-                    ),
-                  ),
-                  Container(
-                    width: 160 + (_animation.value * 30),
-                    height: 160 + (_animation.value * 30),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppColors.listeningPulse.withOpacity(0.2),
-                    ),
-                  ),
-                  Container(
-                    width: 160,
-                    height: 160,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppColors.primary,
-                    ),
-                    child: const Icon(Icons.mic, color: Colors.white, size: 64),
-                  ),
-                ],
-              );
-            },
-          )
-        : Container(
+            // Show the fullscreen listening overlay
+            await showGeneralDialog(
+              context: context,
+              barrierDismissible: false,
+              barrierColor: Colors.transparent,
+              pageBuilder: (ctx, _, __) => ChangeNotifierProvider.value(
+                value: provider,
+                child: const ListeningOverlay(),
+              ),
+            );
+          },
+          child: Container(
             width: 160,
             height: 160,
             decoration: BoxDecoration(
@@ -99,13 +39,20 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
               boxShadow: [
                 BoxShadow(
                   color: AppColors.primary.withOpacity(0.3),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
+                  blurRadius: 20,
+                  spreadRadius: 4,
+                  offset: const Offset(0, 6),
                 ),
               ],
             ),
-            child: const Icon(Icons.mic, color: Colors.white, size: 64),
+            child: const Icon(
+              Icons.mic,
+              color: Colors.white,
+              size: 64,
+            ),
           ),
+        );
+      },
     );
   }
 }

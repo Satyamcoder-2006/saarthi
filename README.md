@@ -14,17 +14,19 @@ Saarthi is a production-grade, privacy-focused voice assistant specifically desi
 *   **"Navigate to Hospital"** - Open Google Maps with pre-filled destination.
 *   **"Play Bhajan"** - Search and play music on YouTube.
 *   **"Remind me of medicine"** - Set voice-triggered reminders.
+*   **Import from Phonebook** - Easily sync important family contacts from the phone's address book into the Saarthi ecosystem.
 
 ### 🧠 Intelligent Backend (Hybrid Architecture)
-*   **Local STT**: Uses **Vosk** on the device for fast, offline speech-to-text.
-*   **LLM Processing**: Uses **Ollama (Llama 3)** on the local host to parse complex sentences into structured intents.
+*   **Indian English STT**: Uses a specialized **Indian English Vosk model** (`en-in-0.4`) optimized for local accents and phonetic nuances.
+*   **LLM Processing**: Uses **Ollama (Llama 3)** to parse complex sentences. Now includes **Fuzzy Matching logic** to handle phonetic misinterpretations (e.g., mapping "karl pooper" to "Papa").
 *   **Rule-Based Fallback**: Instant processing even when the LLM is slow or offline.
 *   **Semantic Caching**: Redis-powered cache for near-instant response to common commands.
+*   **Optimized VAD**: Custom-tuned voice activity detection to allow for longer pauses, perfect for elderly users who may speak slowly.
 
 ### 👴 Elderly-Friendly UX
-*   **High-Contrast UI**: Large buttons and readable fonts.
+*   **High-Contrast UI**: Large buttons and readable fonts for better accessibility.
 *   **Confirmation Loop**: The app talks back ("Should I call Ravi?") before taking any action, preventing accidental dials.
-*   **Aggressive Silence Detection**: No need to "stop" the mic manually; it knows when you've finished talking.
+*   **Local Safety Net**: If the backend misses a contact name, the app automatically performs a local fuzzy search in its Hive database to find the number.
 
 ---
 
@@ -32,14 +34,16 @@ Saarthi is a production-grade, privacy-focused voice assistant specifically desi
 
 ```mermaid
 graph TD
-    A[Flutter App] -->|STT| B[Voice Service]
+    A[Flutter App] -->|STT: en-in| B[Voice Service]
     B -->|Transcript| C[FastAPI Backend]
-    C -->|Query| D{Redis Cache}
+    C -->|Lookup| D[SQLite/Redis]
     D -->|Miss| E[Ollama LLM]
     E -->|JSON Intent| C
-    C -->|Response| A
-    A -->|Confirmation| F[Action Executor]
-    F -->|System Call| G[Dialer/WhatsApp/Maps]
+    C -->|Post-Process| G[Contact Matching]
+    G -->|Response| A
+    A -->|Safety Net| H[Local Hive Match]
+    H -->|Confirmation| F[Action Executor]
+    F -->|System Call| I[Dialer/WhatsApp/Maps]
 ```
 
 ---
@@ -75,11 +79,11 @@ flutter run
 ---
 
 ## 🗺️ Roadmap
-- [x] Vosk Offline STT Integration
+- [x] Vosk Offline STT Integration (Indian English Model)
 - [x] FastAPI Backend with SQLite/Redis
-- [x] Intent Parsing via Ollama
+- [x] Intent Parsing via Ollama (Phonetic Logic)
 - [x] Proactive Android Permission Handling
-- [ ] Contact Sync (Address Book -> Backend)
+- [x] Contact Sync (Address Book -> Backend Sync)
 - [ ] Emergency SOS Hardware Trigger
 - [ ] Multi-lingual support (Hindi/Hinglish LLM tuning)
 

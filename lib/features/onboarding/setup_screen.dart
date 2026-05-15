@@ -45,7 +45,7 @@ class _SetupScreenState extends State<SetupScreen> {
     final api = context.read<ApiService>();
     
     // Temporarily initialize to test
-    api.initialize(baseUrl);
+    await api.initialize();
     
     final isHealthy = await api.checkHealth();
     

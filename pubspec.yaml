@@ -29,6 +29,7 @@ dependencies:
   fuzzy: ^0.5.1
   uuid: ^4.5.1
   archive: ^3.6.1
+  fast_contacts: ^5.0.1
 
 dev_dependencies:
   flutter_test:

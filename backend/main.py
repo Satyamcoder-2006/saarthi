@@ -107,6 +107,17 @@ async def parse_intent(req: IntentRequest, db: AsyncSession = Depends(get_db)):
 
     # 3. Ollama (or rule-based fallback)
     intent = await parse_intent_with_ollama(req.text, contacts_cache)
+    
+    # 3.1 Post-process: Fill in missing phone/whatsapp from cache if name was matched
+    if intent.get("contact") and not intent.get("phone"):
+        name_lower = intent["contact"].lower()
+        for c in contacts_cache:
+            if c["name"].lower() == name_lower or name_lower in c["name"].lower():
+                intent["phone"] = c["phone"]
+                if not intent.get("whatsapp_number"):
+                    intent["whatsapp_number"] = c.get("whatsapp_name")
+                break
+                
     intent["cache_hit"] = False
 
     # 4. Cache result

@@ -43,14 +43,14 @@ class SettingsProvider extends ChangeNotifier {
   Future<void> setLanguage(String lang) async {
     _language = lang;
     await storageService.setString('language', lang);
-    await ttsService.setLanguage(lang);
+    await ttsService.updateLanguage(lang);
     notifyListeners();
   }
 
   Future<void> setVoiceSpeed(double speed) async {
     _voiceSpeed = speed;
     await storageService.setDouble('voice_speed', speed);
-    await ttsService.setSpeechRate(speed);
+    await ttsService.updateSpeed(speed);
     notifyListeners();
   }
 }

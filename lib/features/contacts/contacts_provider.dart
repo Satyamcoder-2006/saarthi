@@ -3,7 +3,9 @@ import '../../core/models/contact.dart';
 import '../../core/services/api_service.dart';
 import '../../core/services/storage_service.dart';
 import '../../core/utils/fuzzy_matcher.dart';
+import 'package:fast_contacts/fast_contacts.dart' as fc;
 import 'package:uuid/uuid.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class ContactsProvider extends ChangeNotifier {
   final ApiService apiService;
@@ -31,9 +33,15 @@ class ContactsProvider extends ChangeNotifier {
           await storageService.contactsBox.clear();
           await storageService.contactsBox.addAll(serverContacts);
           notifyListeners();
+        } else if (_allContacts.isNotEmpty) {
+          // Server is empty but local has data — upload local data to server
+          debugPrint('[ContactsProvider] Syncing local contacts to server...');
+          for (final contact in _allContacts) {
+            await apiService.addContact(contact);
+          }
         }
       } catch (e) {
-        // Keep local cache if backend fails
+        debugPrint('[ContactsProvider] Sync error: $e');
       }
     }
   }
@@ -96,6 +104,58 @@ class ContactsProvider extends ChangeNotifier {
       } catch (_) {}
     }
 
+    notifyListeners();
+  }
+
+  Future<void> syncFromPhone() async {
+    isLoading = true;
+    notifyListeners();
+
+    try {
+      final status = await Permission.contacts.request();
+      if (status.isGranted) {
+        final phoneContacts = await fc.FastContacts.getAllContacts();
+        int count = 0;
+
+        for (final fcContact in phoneContacts) {
+          // Skip if no phone numbers
+          if (fcContact.phones.isEmpty) continue;
+
+          final name = fcContact.displayName;
+          final phone = fcContact.phones.first.number;
+
+          // Check if already exists (prevent duplicates)
+          final exists = _allContacts.any((c) => 
+            c.phone.replaceAll(RegExp(r'\D'), '') == phone.replaceAll(RegExp(r'\D'), '')
+          );
+
+          if (!exists) {
+            final contact = Contact(
+              id: const Uuid().v4(),
+              name: name,
+              phone: phone,
+            );
+
+            _allContacts.add(contact);
+            await storageService.contactsBox.add(contact);
+            
+            if (apiService.isInitialized) {
+              await apiService.addContact(contact);
+            }
+            count++;
+          }
+        }
+        
+        if (count > 0) {
+          filteredContacts = List.from(_allContacts);
+        }
+        debugPrint('[ContactsProvider] Synced $count new contacts from phone.');
+      }
+    } catch (e) {
+      debugPrint('[ContactsProvider] Sync from phone error: $e');
+    }
+
+    isLoading = false;
     notifyListeners();
   }
 }

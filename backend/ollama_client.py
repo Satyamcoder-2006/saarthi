@@ -2,10 +2,12 @@ import httpx
 import json
 import os
 
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://host.containers.internal:11434")
+OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
 SYSTEM_PROMPT = """You are a voice assistant for elderly Indian users. Parse voice commands into structured JSON.
+
+IMPORTANT: Elderly Indian users often have heavy accents. The voice transcript might contain phonetical errors (e.g., "call papa" might come as "karl pooper" or "call popa"). Use context and common sense to map these to the correct intent.
 
 Given a voice transcript, return ONLY valid JSON with this exact structure:
 {
@@ -31,6 +33,9 @@ Valid intent types:
 - set_reminder: user wants a reminder ("remind me", "set alarm", "alert me")
 - emergency_call: user is in distress ("help", "emergency", "I fell", "not feeling well")
 - unknown: cannot be determined
+
+NICKNAME MAPPING:
+If the user mentions "Papa", "Mummy", "Son", "Daughter", "Bhai", "Did", etc., and they aren't in the contacts list, still return the name in the "contact" field.
 
 Return ONLY the JSON object, no explanation."""
 

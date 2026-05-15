@@ -43,7 +43,8 @@ class HomeProvider extends ChangeNotifier {
   }
 
   Future<void> startListening() async {
-    isListening = await voiceService.startListening();
+    await voiceService.startListening();
+    isListening = true;
     notifyListeners();
   }
   

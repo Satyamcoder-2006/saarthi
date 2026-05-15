@@ -42,7 +42,7 @@ class _SplashScreenState extends State<SplashScreen> {
     if (isConfigured) {
       final ip = storage.getString(AppConstants.prefsBackendIp) ?? '';
       final port = storage.getString(AppConstants.prefsBackendPort) ?? AppConstants.defaultPort;
-      api.initialize('http://$ip:$port');
+      await api.initialize();
       context.go('/home');
     } else {
       context.go('/setup');

@@ -1,171 +1,171 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../../core/constants/app_colors.dart';
-import '../../core/constants/app_text_styles.dart';
-import '../../core/models/intent_response.dart';
-import '../../core/utils/action_executor.dart';
-import '../../core/services/tts_service.dart';
-import '../../core/services/api_service.dart';
 
-void showConfirmation(BuildContext context, IntentResponse intent, {String rawText = ''}) {
-  showModalBottomSheet(
-    context: context,
-    isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
-    builder: (_) => ConfirmationSheet(intent: intent, rawText: rawText),
-  );
-}
+import '../../core/constants/app_colors.dart';
+import '../listening/listening_provider.dart';
 
 class ConfirmationSheet extends StatelessWidget {
-  final IntentResponse intent;
-  final String rawText;
+  const ConfirmationSheet({super.key});
 
-  const ConfirmationSheet({
-    Key? key,
-    required this.intent,
-    this.rawText = '',
-  }) : super(key: key);
-
-  IconData _getIcon() {
-    switch (intent.intent) {
-      case 'call_contact':    return Icons.phone_rounded;
-      case 'send_whatsapp':   return Icons.chat_bubble_rounded;
-      case 'send_sms':        return Icons.message_rounded;
-      case 'navigate_to':     return Icons.navigation_rounded;
-      case 'open_app':        return Icons.apps_rounded;
-      case 'set_reminder':    return Icons.notifications_rounded;
-      case 'play_music':      return Icons.music_note_rounded;
-      case 'emergency_call':  return Icons.emergency_rounded;
-      default:                return Icons.help_outline_rounded;
+  IconData _iconForIntent(String intent) {
+    switch (intent) {
+      case 'call_contact': return Icons.phone;
+      case 'send_whatsapp': return Icons.chat;
+      case 'send_sms': return Icons.message;
+      case 'navigate_to': return Icons.navigation;
+      case 'open_app': return Icons.apps;
+      case 'play_music': return Icons.music_note;
+      case 'set_reminder': return Icons.alarm;
+      case 'emergency_call': return Icons.emergency;
+      default: return Icons.help_outline;
     }
   }
 
-  Color _getColor() {
-    switch (intent.intent) {
-      case 'send_whatsapp':  return AppColors.whatsappGreen;
-      case 'navigate_to':    return AppColors.accent;
-      case 'open_app':       return Colors.purple;
-      case 'play_music':     return Colors.deepOrange;
-      case 'emergency_call': return AppColors.emergencyRed;
-      default:               return AppColors.primary;
+  Color _colorForIntent(String intent) {
+    switch (intent) {
+      case 'call_contact': return AppColors.primary;
+      case 'send_whatsapp': return AppColors.whatsappGreen;
+      case 'send_sms': return Colors.blue;
+      case 'navigate_to': return Colors.orange;
+      case 'play_music': return Colors.purple;
+      case 'emergency_call': return AppColors.error;
+      default: return AppColors.primary;
     }
-  }
-
-  String _getTitle() {
-    switch (intent.intent) {
-      case 'call_contact':   return 'Call ${intent.contact ?? 'contact'}?';
-      case 'send_whatsapp':  return 'WhatsApp ${intent.contact ?? 'contact'}?';
-      case 'send_sms':       return 'Message ${intent.contact ?? 'contact'}?';
-      case 'navigate_to':    return 'Navigate to ${intent.destination}?';
-      case 'open_app':       return 'Open ${intent.appName}?';
-      case 'set_reminder':   return 'Set Reminder?';
-      case 'play_music':     return 'Play "${intent.query}"?';
-      case 'emergency_call': return '🚨 Emergency Call?';
-      default:               return 'Confirm Action?';
-    }
-  }
-
-  String _getSubtitle() {
-    if (intent.phone != null) return 'Number: ${intent.phone}';
-    if (intent.message != null) return '"${intent.message}"';
-    if (intent.reminderMessage != null) return intent.reminderMessage!;
-    return '';
   }
 
   @override
   Widget build(BuildContext context) {
-    final color = _getColor();
-    final subtitle = _getSubtitle();
+    final provider = context.watch<ListeningProvider>();
+    final intent = provider.pendingIntent;
+    if (intent == null) return const SizedBox.shrink();
 
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 24, right: 24, top: 24,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+    final color = _colorForIntent(intent.intent);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Handle
+          // Drag handle
           Container(
-            width: 40, height: 4,
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 24),
             decoration: BoxDecoration(
               color: Colors.grey[300],
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          const SizedBox(height: 28),
 
-          // Icon circle
+          // Icon
           Container(
-            width: 80, height: 80,
+            width: 72,
+            height: 72,
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
+              color: color.withOpacity(0.12),
               shape: BoxShape.circle,
             ),
-            child: Icon(_getIcon(), color: color, size: 40),
+            child: Icon(_iconForIntent(intent.intent), color: color, size: 36),
           ),
-          const SizedBox(height: 20),
 
-          // Title
+          const SizedBox(height: 16),
+
+          // Action title
           Text(
-            _getTitle(),
-            style: AppTextStyles.headingBold,
+            intent.actionTitle,
+            style: const TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF1C1C1E),
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          // Action detail
+          Text(
+            intent.actionDetail,
+            style: const TextStyle(
+              fontSize: 18,
+              color: Color(0xFF6E6E73),
+            ),
             textAlign: TextAlign.center,
           ),
 
-          // Subtitle
-          if (subtitle.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Text(
-              subtitle,
-              style: AppTextStyles.bodyMedium.copyWith(color: Colors.grey[600]),
-              textAlign: TextAlign.center,
-            ),
-          ],
-
-          const SizedBox(height: 36),
+          const SizedBox(height: 32),
 
           // YES button
           SizedBox(
             width: double.infinity,
-            height: 64,
+            height: 72,
             child: ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: color,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                elevation: 0,
+                backgroundColor: AppColors.primary,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
               ),
               onPressed: () {
-                final tts = context.read<TtsService>();
-                final api = context.read<ApiService>();
-                ActionExecutor.execute(intent, tts, api, rawText: rawText);
                 Navigator.of(context).pop();
+                provider.confirmAndExecute();
               },
-              child: Text('Yes, do it', style: AppTextStyles.buttonLabel),
+              child: const Text(
+                'Yes, do it',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
             ),
           ),
-          const SizedBox(height: 14),
+
+          const SizedBox(height: 12),
 
           // CANCEL button
           SizedBox(
             width: double.infinity,
-            height: 64,
+            height: 72,
             child: OutlinedButton(
               style: OutlinedButton.styleFrom(
-                side: BorderSide(color: Colors.grey[400]!, width: 1.5),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                side: BorderSide(color: AppColors.error, width: 1.5),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
               ),
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: () {
+                Navigator.of(context).pop();
+                provider.cancelConfirmation();
+              },
               child: Text(
                 'Cancel',
-                style: AppTextStyles.buttonLabel.copyWith(color: Colors.grey[700]),
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.error,
+                ),
               ),
             ),
           ),
-          const SizedBox(height: 8),
+
+          const SizedBox(height: 16),
+
+          // Voice hint
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: const [
+              Icon(Icons.mic, size: 14, color: Color(0xFFAEAEB2)),
+              SizedBox(width: 4),
+              Text(
+                "Say 'Yes' or 'No' to confirm",
+                style: TextStyle(fontSize: 14, color: Color(0xFFAEAEB2)),
+              ),
+            ],
+          ),
         ],
       ),
     );

@@ -16,6 +16,16 @@ class StorageService {
     _prefs = await SharedPreferences.getInstance();
     
     // Hive is already initialized in main.dart
+    if (!Hive.isAdapterRegistered(0)) {
+      Hive.registerAdapter(ContactAdapter());
+    }
+    if (!Hive.isAdapterRegistered(1)) {
+      Hive.registerAdapter(ReminderAdapter());
+    }
+    if (!Hive.isAdapterRegistered(2)) {
+      Hive.registerAdapter(ActionLogAdapter());
+    }
+
     contactsBox = await Hive.openBox<Contact>('contacts_box');
     remindersBox = await Hive.openBox<Reminder>('reminders_box');
     actionLogBox = await Hive.openBox<ActionLog>('action_log_box');

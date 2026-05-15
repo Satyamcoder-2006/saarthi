@@ -25,6 +25,28 @@ class _ContactsScreenState extends State<ContactsScreen> {
         title: Text('Contacts', style: AppTextStyles.screenTitle),
         backgroundColor: AppColors.background,
         elevation: 0,
+        actions: [
+          if (provider.isLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.only(right: 16.0),
+                child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.sync, color: AppColors.primary),
+              onPressed: () async {
+                await provider.syncFromPhone();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Contacts imported from phone!')),
+                  );
+                }
+              },
+              tooltip: 'Sync from phone',
+            ),
+        ],
       ),
       body: Column(
         children: [

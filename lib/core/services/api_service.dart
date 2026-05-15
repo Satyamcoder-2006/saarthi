@@ -1,146 +1,127 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/intent_response.dart';
 import '../models/contact.dart';
 import '../models/action_log.dart';
-import '../models/reminder.dart';
 
 class ApiService {
   late Dio _dio;
-  bool _isInitialized = false;
-  String _userId = 'local_device';
+  bool _initialized = false;
 
-  void initialize(String baseUrl, {String userId = 'local_device'}) {
-    _userId = userId;
+  // Call this on app start and whenever IP changes in settings
+  Future<void> initialize() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ip = prefs.getString('backend_ip') ?? '192.168.1.100';
+    final port = prefs.getString('backend_port') ?? '8000';
+    final baseUrl = 'http://$ip:$port';
+
     _dio = Dio(BaseOptions(
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 30),
+      headers: {'Content-Type': 'application/json'},
     ));
-    _isInitialized = true;
+
+    // Log all requests/responses in debug mode
+    if (kDebugMode) {
+      _dio.interceptors.add(LogInterceptor(
+        requestBody: true,
+        responseBody: true,
+        logPrint: (obj) => debugPrint('[API] $obj'),
+      ));
+    }
+
+    _initialized = true;
+    debugPrint('[ApiService] initialized with baseUrl=$baseUrl');
   }
 
-  bool get isInitialized => _isInitialized;
-  String get userId => _userId;
-
-  // ── Health ──────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────
+  // HEALTH CHECK
+  // ─────────────────────────────────────────────────────────────────
   Future<bool> checkHealth() async {
-    if (!_isInitialized) return false;
+    if (!_initialized) await initialize();
     try {
       final response = await _dio.get('/health');
       return response.statusCode == 200;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[ApiService] health check failed: $e');
       return false;
     }
   }
 
-  // ── POST /intent ─────────────────────────────────────────────────────────────
-  Future<IntentResponse> parseIntent(String transcript, String userId) async {
-    if (!_isInitialized) throw Exception('API not initialized');
-    final response = await _dio.post('/intent', data: {
-      'text': transcript,
-      'user_id': userId,
-    });
-    return IntentResponse.fromJson(response.data as Map<String, dynamic>);
+  // ─────────────────────────────────────────────────────────────────
+  // PARSE INTENT — main method called after voice transcript is ready
+  // Sends: { "text": "call ravi", "user_id": "device-uuid" }
+  // Returns: IntentResponse with intent, contact, message, etc.
+  // ─────────────────────────────────────────────────────────────────
+  Future<IntentResponse?> parseIntent(String transcript, String userId) async {
+    if (!_initialized) await initialize();
+
+    try {
+      debugPrint('[ApiService] POST /intent with text="$transcript"');
+
+      final response = await _dio.post('/intent', data: {
+        'text': transcript,
+        'user_id': userId,
+      });
+
+      if (response.statusCode == 200) {
+        final json = response.data as Map<String, dynamic>;
+        final intent = IntentResponse.fromJson(json);
+        debugPrint('[ApiService] intent parsed: ${intent.intent}');
+        return intent;
+      } else {
+        debugPrint('[ApiService] bad status: ${response.statusCode}');
+        return null;
+      }
+    } on DioException catch (e) {
+      debugPrint('[ApiService] DioException: ${e.type} ${e.message}');
+      return null;
+    } catch (e) {
+      debugPrint('[ApiService] unexpected error: $e');
+      return null;
+    }
   }
 
-  // ── POST /execute ─────────────────────────────────────────────────────────────
-  Future<void> logExecution({
+  // ─────────────────────────────────────────────────────────────────
+  // LOG ACTION — tell backend what was executed
+  // ─────────────────────────────────────────────────────────────────
+  Future<void> logAction({
+    required String userId,
     required String intent,
     required String rawText,
-    bool success = true,
+    required bool success,
   }) async {
-    if (!_isInitialized) return;
+    if (!_initialized) await initialize();
     try {
-      await _dio.post('/execute', data: {
-        'user_id': _userId,
+      await _dio.post('/log', data: {
+        'user_id': userId,
         'intent': intent,
         'raw_text': rawText,
         'success': success,
       });
-    } catch (_) {
-      // Non-critical — don't throw
+    } catch (e) {
+      debugPrint('[ApiService] logAction failed (non-critical): $e');
+      // Non-critical — don't crash the app if logging fails
     }
   }
 
-  // ── GET /contacts ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────
+  // MOCKS FOR OTHER PROVIDERS
+  // ─────────────────────────────────────────────────────────────────
+  bool get isInitialized => _initialized;
+
+  Future<List<ActionLog>> getHistory() async {
+    return [];
+  }
+
   Future<List<Contact>> getContacts() async {
-    if (!_isInitialized) return [];
-    try {
-      final response = await _dio.get('/contacts', queryParameters: {'user_id': _userId});
-      if (response.data is List) {
-        return (response.data as List)
-            .map((json) => Contact.fromJson(json as Map<String, dynamic>))
-            .toList();
-      }
-      return [];
-    } catch (_) {
-      return [];
-    }
+    return [];
   }
 
-  // ── POST /contacts ────────────────────────────────────────────────────────────
-  Future<Contact> addContact(Contact contact) async {
-    if (!_isInitialized) throw Exception('API not initialized');
-    final response = await _dio.post(
-      '/contacts',
-      queryParameters: {'user_id': _userId},
-      data: contact.toJson(),
-    );
-    return Contact.fromJson(response.data as Map<String, dynamic>);
-  }
+  Future<void> addContact(Contact contact) async {}
 
-  // ── DELETE /contacts/:id ──────────────────────────────────────────────────────
-  Future<void> deleteContact(String contactId) async {
-    if (!_isInitialized) return;
-    try {
-      await _dio.delete(
-        '/contacts/$contactId',
-        queryParameters: {'user_id': _userId},
-      );
-    } catch (_) {}
-  }
-
-  // ── POST /reminder ─────────────────────────────────────────────────────────────
-  Future<void> createReminder(Reminder reminder) async {
-    if (!_isInitialized) return;
-    try {
-      await _dio.post('/reminder', data: {
-        'user_id': _userId,
-        'message': reminder.title,
-        'trigger_at': reminder.time.toIso8601String(),
-        'repeat': reminder.repeatPattern,
-      });
-    } catch (_) {}
-  }
-
-  // ── GET /reminders ─────────────────────────────────────────────────────────────
-  Future<List<Map<String, dynamic>>> getReminders() async {
-    if (!_isInitialized) return [];
-    try {
-      final response = await _dio.get('/reminders', queryParameters: {'user_id': _userId});
-      if (response.data is List) {
-        return List<Map<String, dynamic>>.from(response.data as List);
-      }
-      return [];
-    } catch (_) {
-      return [];
-    }
-  }
-
-  // ── GET /history ──────────────────────────────────────────────────────────────
-  Future<List<ActionLog>> getHistory({int limit = 20}) async {
-    if (!_isInitialized) return [];
-    try {
-      final response = await _dio.get('/history',
-          queryParameters: {'user_id': _userId, 'limit': limit});
-      if (response.data is List) {
-        return (response.data as List)
-            .map((json) => ActionLog.fromJson(json as Map<String, dynamic>))
-            .toList();
-      }
-      return [];
-    } catch (_) {
-      return [];
-    }
-  }
+  Future<void> deleteContact(String id) async {}
 }

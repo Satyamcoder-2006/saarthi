@@ -17,6 +17,7 @@ dependencies:
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   speech_to_text: ^7.0.0
+  flutter_phone_direct_caller: ^2.1.1
   flutter_tts: ^4.2.0
   permission_handler: ^11.0.0
   flutter_foreground_task: ^8.11.0

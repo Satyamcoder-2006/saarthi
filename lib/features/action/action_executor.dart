@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
 
 import '../../core/models/intent_response.dart';
 
@@ -76,26 +77,48 @@ class ActionExecutor {
     if (phone.isEmpty) {
       return ActionResult(
         success: false,
-        spokenFeedback: 'I could not find ${intent.contact}\'s phone number.',
+        spokenFeedback: 'I could not find ${intent.contact ?? "that contact"}\'s phone number.',
       );
     }
 
-    final uri = Uri(scheme: 'tel', path: phone);
+    // Strip everything except digits and leading +
+    final cleaned = phone.replaceAll(RegExp(r'[^\d+]'), '');
+
     try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
+      // FlutterPhoneDirectCaller.callNumber fires ACTION_CALL —
+      // the call connects immediately without opening the dialpad.
+      // It handles the CALL_PHONE permission request automatically
+      // on first use if not already granted.
+      final bool? res = await FlutterPhoneDirectCaller.callNumber(cleaned);
+
+      if (res == true) {
         return ActionResult(
           success: true,
-          spokenFeedback: 'Calling ${intent.contact ?? phone} now.',
+          spokenFeedback: 'Calling ${intent.contact ?? cleaned} now.',
+        );
+      } else {
+        // Permission denied or call failed — fall back to dialpad
+        final uri = Uri(scheme: 'tel', path: cleaned);
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri);
+        }
+        return ActionResult(
+          success: false,
+          spokenFeedback: 'Opening the dialpad for ${intent.contact ?? cleaned}.',
         );
       }
     } catch (e) {
-      debugPrint('[ActionExecutor] call error: $e');
+      debugPrint('[ActionExecutor] direct call error: $e');
+      // Fallback to dialpad on any exception
+      final uri = Uri(scheme: 'tel', path: cleaned);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri);
+      }
+      return ActionResult(
+        success: false,
+        spokenFeedback: 'Opening the dialpad. Please tap call.',
+      );
     }
-    return ActionResult(
-      success: false,
-      spokenFeedback: 'I could not make the call. Please try manually.',
-    );
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -255,23 +278,23 @@ class ActionExecutor {
 
   // ─────────────────────────────────────────────────────────────────
   static Future<ActionResult> _emergencyCall(IntentResponse intent) async {
-    // Get emergency contact from SharedPreferences
-    // Then call immediately without extra confirmation
-    final uri = Uri(scheme: 'tel', path: intent.phone ?? '112');
+    final phone = intent.phone ?? '112';
+    final cleaned = phone.replaceAll(RegExp(r'[^\d+]'), '');
+
     try {
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-        return const ActionResult(
-          success: true,
-          spokenFeedback: 'Calling emergency contact now.',
-        );
-      }
+      await FlutterPhoneDirectCaller.callNumber(cleaned);
+      return const ActionResult(
+        success: true,
+        spokenFeedback: 'Calling emergency contact now.',
+      );
     } catch (e) {
-      debugPrint('[ActionExecutor] emergency error: $e');
+      debugPrint('[ActionExecutor] direct emergency call error: $e');
+      final uri = Uri(scheme: 'tel', path: cleaned);
+      if (await canLaunchUrl(uri)) await launchUrl(uri);
+      return const ActionResult(
+        success: false,
+        spokenFeedback: 'Please call for help manually.',
+      );
     }
-    return const ActionResult(
-      success: false,
-      spokenFeedback: 'Could not make emergency call.',
-    );
   }
 }

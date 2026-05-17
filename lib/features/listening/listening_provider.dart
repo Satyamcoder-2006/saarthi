@@ -5,255 +5,366 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/models/intent_response.dart';
 import '../../core/services/api_service.dart';
+import '../../core/services/storage_service.dart';
 import '../../core/services/tts_service.dart';
 import '../../core/services/voice_service.dart';
-import '../../core/services/storage_service.dart';
 import '../../core/utils/fuzzy_matcher.dart';
 import '../action/action_executor.dart';
 
 enum PipelineState {
-  idle,           // Nothing happening
-  listening,      // Mic is open, Vosk running
-  transcribing,   // Got transcript, sending to backend
-  confirming,     // Showing confirmation sheet to user
-  executing,      // Running the action
-  done,           // Action complete
-  error,          // Something went wrong
+  idle,         // Nothing happening, home screen visible
+  listening,    // Mic open, Google STT running, overlay shown
+  transcribing, // Got final text, HTTP request sent to backend
+  confirming,   // Intent received, showing ConfirmationSheet
+  executing,    // User tapped Yes, action running
+  done,         // Action complete, back to home
+  error,        // Something went wrong
 }
 
 class ListeningProvider extends ChangeNotifier {
-  final VoiceService _voiceService;
-  final ApiService _apiService;
-  final TtsService _ttsService;
-  final StorageService _storageService;
+  final VoiceService _voice;
+  final ApiService _api;
+  final TtsService _tts;
+  final StorageService _storage;
 
   ListeningProvider({
     required VoiceService voiceService,
     required ApiService apiService,
     required TtsService ttsService,
     required StorageService storageService,
-  })  : _voiceService = voiceService,
-        _apiService = apiService,
-        _ttsService = ttsService,
-        _storageService = storageService {
-    // Wire up voice service → pipeline
-    _voiceService.onFinalTranscript.listen(_onTranscriptReady);
+  })  : _voice = voiceService,
+        _api = apiService,
+        _tts = ttsService,
+        _storage = storageService {
+    // Wire VoiceService → pipeline
+    // When Google STT fires a final result, this provider handles it.
+    _voice.onFinalTranscript.listen(_onFinalTranscript);
   }
 
-  // ── State ────────────────────────────────────────────────────────
-  PipelineState _pipelineState = PipelineState.idle;
-  PipelineState get pipelineState => _pipelineState;
+  // ── Public state (UI reads these) ────────────────────────────────
+  PipelineState _state = PipelineState.idle;
+  PipelineState get pipelineState => _state;
 
-  String _livePartialText = '';
-  String get livePartialText => _livePartialText;
+  // Live partial text (updates every ~300ms while user speaks)
+  String _liveText = '';
+  String get liveText => _liveText;
 
+  // The last committed transcript (shown in overlay after speaking)
   String _lastTranscript = '';
   String get lastTranscript => _lastTranscript;
 
+  // The intent returned by the backend (or parsed locally)
   IntentResponse? _pendingIntent;
   IntentResponse? get pendingIntent => _pendingIntent;
 
+  // Error message for overlay UI
   String? _errorMessage;
   String? get errorMessage => _errorMessage;
 
-  StreamSubscription? _partialSub;
+  // Subscription to live partial text stream
+  StreamSubscription<String>? _partialSub;
 
   // ─────────────────────────────────────────────────────────────────
-  // STEP 1: User taps mic → start listening
+  // STAGE 1: User taps mic → start listening
   // ─────────────────────────────────────────────────────────────────
   Future<void> startListening() async {
-    if (_pipelineState != PipelineState.idle &&
-        _pipelineState != PipelineState.done &&
-        _pipelineState != PipelineState.error) return;
+    // Don't start if already in the middle of something
+    if (_state == PipelineState.listening ||
+        _state == PipelineState.transcribing ||
+        _state == PipelineState.executing) return;
 
-    _livePartialText = '';
+    // Reset everything
+    _liveText = '';
+    _lastTranscript = '';
     _pendingIntent = null;
     _errorMessage = null;
-    _setPipelineState(PipelineState.listening);
+    _setState(PipelineState.listening);
 
-    // Show live partial text in the UI
-    _partialSub = _voiceService.onPartialText.listen((text) {
-      _livePartialText = text;
+    // Subscribe to live partial text for overlay UI
+    _partialSub?.cancel();
+    _partialSub = _voice.onPartialText.listen((text) {
+      _liveText = text;
       notifyListeners();
     });
 
-    // Initialize voice service if not already done
-    if (_voiceService.state == VoiceState.idle ||
-        _voiceService.state == VoiceState.error) {
-      await _voiceService.initialize();
+    // Initialize Google STT if needed (first call only)
+    if (_voice.state == VoiceState.idle || _voice.state == VoiceState.error) {
+      final ok = await _voice.initialize();
+      if (!ok) {
+        _setError(
+          _voice.errorMessage ??
+              'Could not start voice recognition. Please try again.',
+        );
+        await _tts.speak(
+          'Could not start the microphone. Please check your permissions.',
+        );
+        return;
+      }
     }
 
-    if (_voiceService.state != VoiceState.ready) {
-      _setError('Voice recognition not available. Please restart the app.');
-      return;
-    }
-
-    await _voiceService.startListening();
+    // Open the mic — Google STT starts listening
+    await _voice.startListening();
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // STEP 2: Vosk auto-stops → transcript is ready → send to backend
-  // This is called automatically when VoiceService emits onFinalTranscript
+  // STAGES 3 & 4: Google STT fires final result → send to backend & apply local safety net
   // ─────────────────────────────────────────────────────────────────
-  Future<void> _onTranscriptReady(String transcript) async {
+  Future<void> _onFinalTranscript(String transcript) async {
+    // Cancel partial text subscription (no more live updates needed)
     _partialSub?.cancel();
+
     _lastTranscript = transcript;
-    _livePartialText = transcript;
+    _liveText = transcript; // freeze the final text on screen
     notifyListeners();
 
-    debugPrint('[Pipeline] transcript ready: "$transcript"');
+    debugPrint('[Pipeline] STAGE 3 — transcript: "$transcript"');
 
     if (transcript.trim().isEmpty) {
       _setError("I didn't hear anything. Please try again.");
-      await _ttsService.speak("I didn't hear anything. Please try again.");
+      await _tts.speak("I didn't hear anything. Please try again.");
       return;
     }
 
-    _setPipelineState(PipelineState.transcribing);
+    _setState(PipelineState.transcribing);
 
-    // ── Send to backend ───────────────────────────────────────────
     final userId = await _getDeviceId();
-    final intent = await _apiService.parseIntent(transcript, userId);
 
-    if (intent == null) {
-      _setError("Couldn't connect to assistant. Check your WiFi.");
-      await _ttsService.speak("I couldn't connect. Please check your WiFi and try again.");
-      _voiceService.markProcessingDone();
-      return;
+    // ── STAGE 4: Send to backend ───────────────────────────────────
+    IntentResponse? intent;
+    try {
+      intent = await _api.parseIntent(transcript, userId);
+    } catch (e) {
+      debugPrint('[Pipeline] API call threw: $e');
     }
 
-    // ── Local Safety Net ──────────────────────────────────────────
-    // If backend found a contact name but no phone, or didn't find the name
-    // but the transcript contains a known contact name.
-    IntentResponse processedIntent = intent;
-    if ((intent.intent == 'call_contact' || intent.intent == 'send_whatsapp') &&
+    // Initialize our intent processor
+    IntentResponse processedIntent;
+    if (intent != null) {
+      processedIntent = intent;
+    } else {
+      // Create a default placeholder if the API failed, allowing offline fallback to run
+      processedIntent = const IntentResponse(intent: 'unknown', confidence: 0.0);
+    }
+
+    // ── LOCAL SAFETY NET ──
+    // If the backend parsed a contact command successfully but didn't return a phone number
+    final localContacts = _storage.contactsBox.values.toList();
+    if (intent != null &&
+        (intent.intent == 'call_contact' || intent.intent == 'send_whatsapp') &&
         (intent.phone == null || intent.phone!.isEmpty)) {
       
-      final localContacts = _storageService.contactsBox.values.toList();
       final contactName = intent.contact ?? '';
-      
       if (contactName.isNotEmpty) {
         final matches = FuzzyMatcher.searchContacts(contactName, localContacts);
         if (matches.isNotEmpty) {
           processedIntent = intent.copyWith(
             phone: matches.first.phone,
-            contact: matches.first.name,
+            contact: matches.first.name, // preserves original name with emojis
           );
           debugPrint('[Pipeline] Local safety net matched: ${processedIntent.contact} (${processedIntent.phone})');
         }
       }
     }
 
+    // ── LOCAL HEURISTIC PARSER / OFFLINE FALLBACK ──
+    // If the API failed or didn't understand the command, perform a local rule-based match
     if (!processedIntent.isValid) {
-      _setError("I didn't understand that. Please try again.");
-      await _ttsService.speak("Sorry, I didn't understand that. Could you say it again?");
-      _voiceService.markProcessingDone();
-      _setPipelineState(PipelineState.idle);
+      final lowerText = transcript.toLowerCase();
+      String? matchedName;
+      String? matchedPhone;
+      String? intentType;
+      String? actionTitle;
+      String? actionDetail;
+      String? messageText;
+
+      // 1. Call Intent
+      if (lowerText.startsWith('call ') || lowerText.contains(' call ')) {
+        intentType = 'call_contact';
+        final parts = lowerText.split('call ');
+        if (parts.length > 1) {
+          final candidate = parts.last.trim();
+          final matches = FuzzyMatcher.searchContacts(candidate, localContacts);
+          if (matches.isNotEmpty) {
+            matchedName = matches.first.name;
+            matchedPhone = matches.first.phone;
+            actionTitle = 'Call Contact';
+            actionDetail = 'Call $matchedName';
+          }
+        }
+      }
+      // 2. WhatsApp/Message Intent
+      else if (lowerText.startsWith('whatsapp ') || lowerText.contains('whatsapp ') ||
+               lowerText.startsWith('message ') || lowerText.contains('message ')) {
+        intentType = 'send_whatsapp';
+        
+        String candidate = '';
+        if (lowerText.contains('whatsapp ')) {
+          candidate = lowerText.split('whatsapp ').last.trim();
+        } else if (lowerText.contains('message ')) {
+          candidate = lowerText.split('message ').last.trim();
+        }
+
+        // Split out the optional message component
+        if (candidate.contains(' saying ')) {
+          candidate = candidate.split(' saying ').first.trim();
+        } else if (candidate.contains(' that ')) {
+          candidate = candidate.split(' that ').first.trim();
+        }
+
+        if (candidate.isNotEmpty) {
+          final matches = FuzzyMatcher.searchContacts(candidate, localContacts);
+          if (matches.isNotEmpty) {
+            matchedName = matches.first.name;
+            matchedPhone = matches.first.phone;
+
+            if (lowerText.contains(' saying ')) {
+              messageText = transcript.substring(lowerText.indexOf(' saying ') + 8).trim();
+            } else if (lowerText.contains(' that ')) {
+              messageText = transcript.substring(lowerText.indexOf(' that ') + 6).trim();
+            }
+
+            actionTitle = 'Send WhatsApp';
+            actionDetail = 'Message $matchedName: "$messageText"';
+          }
+        }
+      }
+
+      // If local parsing successfully matched a synced contact
+      if (intentType != null && matchedName != null && matchedPhone != null) {
+        processedIntent = IntentResponse(
+          intent: intentType,
+          confidence: 0.95,
+          contact: matchedName,
+          phone: matchedPhone,
+          message: messageText,
+        );
+        debugPrint('[Pipeline] Local parsing fallback matched: $matchedName ($matchedPhone)');
+      }
+    }
+
+    // If still invalid, check if it was a connection timeout/failure
+    if (!processedIntent.isValid && intent == null) {
+      _setError("Couldn't reach the assistant. Check your WiFi.");
+      await _tts.speak(
+        "I couldn't connect to the assistant. "
+        "Please check that your laptop is on and connected to the same WiFi.",
+      );
+      _voice.markProcessingDone();
       return;
     }
 
-    debugPrint('[Pipeline] intent received: ${processedIntent.intent}, confidence=${processedIntent.confidence}');
+    // Handle low-confidence / unknown intents
+    if (!processedIntent.isValid) {
+      _setError("I didn't understand that.");
+      await _tts.speak(
+        "Sorry, I didn't understand that. "
+        "Could you say it a different way?",
+      );
+      _voice.markProcessingDone();
+      _setState(PipelineState.idle);
+      return;
+    }
 
-    // ── Speak confirmation ────────────────────────────────────────
+    debugPrint('[Pipeline] STAGE 4 — intent: ${processedIntent.intent}, confidence=${processedIntent.confidence}');
+
+    // ── STAGE 5 (pre): show confirmation ─────────────────────────
     _pendingIntent = processedIntent;
-    _setPipelineState(PipelineState.confirming);
-    await _ttsService.speakConfirmation(processedIntent.actionTitle, processedIntent.actionDetail);
+    _setState(PipelineState.confirming);
 
-    // NOTE: At this point, the UI (ListeningOverlay) sees pipelineState == confirming
-    // and shows the ConfirmationSheet automatically. See listening_overlay.dart.
+    // Speak the confirmation so user knows what will happen
+    await _tts.speak(
+      '${processedIntent.actionTitle}. ${processedIntent.actionDetail}. Say yes or tap confirm.',
+    );
+
     notifyListeners();
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // STEP 3: User taps "Yes" on confirmation sheet → execute action
+  // STAGE 5: User taps "Yes, do it" → execute action
   // ─────────────────────────────────────────────────────────────────
   Future<void> confirmAndExecute() async {
     if (_pendingIntent == null) return;
-    _setPipelineState(PipelineState.executing);
 
+    _setState(PipelineState.executing);
     final intent = _pendingIntent!;
     final userId = await _getDeviceId();
 
-    bool success = false;
-    String? spokenResult;
-
+    ActionResult result;
     try {
-      final result = await ActionExecutor.execute(intent);
-      success = result.success;
-      spokenResult = result.spokenFeedback;
+      result = await ActionExecutor.execute(intent);
     } catch (e) {
-      debugPrint('[Pipeline] execute error: $e');
-      success = false;
-      spokenResult = 'Something went wrong. Please try again.';
+      result = ActionResult(
+        success: false,
+        spokenFeedback: 'Something went wrong. Please try again.',
+      );
+      debugPrint('[Pipeline] execute threw: $e');
     }
 
-    // Log to backend (non-blocking)
-    _apiService.logAction(
+    // Log to backend (fire and forget)
+    _api.logAction(
       userId: userId,
       intent: intent.intent,
       rawText: _lastTranscript,
-      success: success,
+      success: result.success,
     );
 
-    // Speak the result
-    if (spokenResult != null) {
-      await _ttsService.speak(spokenResult);
-    }
+    // Speak outcome to user
+    await _tts.speak(result.spokenFeedback);
 
-    _voiceService.markProcessingDone();
-    _setPipelineState(PipelineState.done);
+    _voice.markProcessingDone();
+    _setState(PipelineState.done);
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // STEP 3 (alternative): User taps "Cancel"
+  // User taps Cancel on confirmation sheet
   // ─────────────────────────────────────────────────────────────────
   Future<void> cancelConfirmation() async {
     _pendingIntent = null;
-    _voiceService.markProcessingDone();
-    await _ttsService.speak("Cancelled.");
-    _setPipelineState(PipelineState.idle);
+    _voice.markProcessingDone();
+    await _tts.speak('Cancelled.');
+    _setState(PipelineState.idle);
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // Manual stop (user taps X on listening overlay)
+  // User taps X to dismiss the listening overlay manually
   // ─────────────────────────────────────────────────────────────────
   Future<void> stopListening() async {
     _partialSub?.cancel();
-    await _voiceService.stopListening();
-    _livePartialText = '';
-    _setPipelineState(PipelineState.idle);
+    await _voice.stopListening();
+    _liveText = '';
+    _setState(PipelineState.idle);
   }
 
-  // ─────────────────────────────────────────────────────────────────
-  // Reset to idle
-  // ─────────────────────────────────────────────────────────────────
+  // Reset to idle (e.g. after done state, ready for next command)
   void reset() {
+    _partialSub?.cancel();
     _pendingIntent = null;
     _errorMessage = null;
-    _livePartialText = '';
+    _liveText = '';
     _lastTranscript = '';
-    _voiceService.markProcessingDone();
-    _setPipelineState(PipelineState.idle);
+    _voice.markProcessingDone();
+    _setState(PipelineState.idle);
   }
 
   // ─────────────────────────────────────────────────────────────────
   // HELPERS
   // ─────────────────────────────────────────────────────────────────
-  void _setPipelineState(PipelineState s) {
-    _pipelineState = s;
+  void _setState(PipelineState s) {
+    _state = s;
     notifyListeners();
   }
 
-  void _setError(String message) {
-    _errorMessage = message;
-    _setPipelineState(PipelineState.error);
+  void _setError(String msg) {
+    _errorMessage = msg;
+    _setState(PipelineState.error);
+    _voice.markProcessingDone();
   }
 
   Future<String> _getDeviceId() async {
     final prefs = await SharedPreferences.getInstance();
     var id = prefs.getString('device_id');
     if (id == null) {
-      id = DateTime.now().millisecondsSinceEpoch.toString();
+      id = 'device_${DateTime.now().millisecondsSinceEpoch}';
       await prefs.setString('device_id', id);
     }
     return id;

@@ -12,23 +12,31 @@ class MicButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<ListeningProvider>(
       builder: (context, provider, _) {
-        final isActive = provider.pipelineState == PipelineState.listening;
-
         return GestureDetector(
           onTap: () async {
-            // Start listening in provider first
-            provider.startListening();
+            // Stage 1: kick off the pipeline
+            await provider.startListening();
 
             // Show the fullscreen listening overlay
-            await showGeneralDialog(
-              context: context,
-              barrierDismissible: false,
-              barrierColor: Colors.transparent,
-              pageBuilder: (ctx, _, __) => ChangeNotifierProvider.value(
-                value: provider,
-                child: const ListeningOverlay(),
-              ),
-            );
+            // This stays open until pipeline reaches done/error/idle
+            if (context.mounted) {
+              await Navigator.of(context).push(
+                PageRouteBuilder(
+                  opaque: false,
+                  barrierDismissible: false,
+                  pageBuilder: (ctx, _, __) => ChangeNotifierProvider.value(
+                    value: provider,
+                    child: const ListeningOverlay(),
+                  ),
+                  transitionsBuilder: (_, anim, __, child) =>
+                      FadeTransition(opacity: anim, child: child),
+                  transitionDuration: const Duration(milliseconds: 250),
+                ),
+              );
+            }
+
+            // After overlay closes: reset pipeline to idle
+            provider.reset();
           },
           child: Container(
             width: 160,
@@ -38,17 +46,17 @@ class MicButton extends StatelessWidget {
               color: AppColors.primary,
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withOpacity(0.3),
-                  blurRadius: 20,
-                  spreadRadius: 4,
-                  offset: const Offset(0, 6),
+                  color: AppColors.primary.withOpacity(0.35),
+                  blurRadius: 24,
+                  spreadRadius: 6,
+                  offset: const Offset(0, 8),
                 ),
               ],
             ),
             child: const Icon(
               Icons.mic,
               color: Colors.white,
-              size: 64,
+              size: 66,
             ),
           ),
         );

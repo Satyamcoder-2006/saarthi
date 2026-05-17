@@ -1,221 +1,184 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:vosk_flutter_2/vosk_flutter_2.dart';
+import 'package:speech_to_text/speech_recognition_error.dart';
+import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
-enum VoiceState { idle, initializing, ready, listening, processing, error }
+// All possible states of the voice service
+enum VoiceState {
+  idle,          // Not doing anything
+  initializing,  // Calling speech.initialize() for the first time
+  ready,         // Initialized, waiting for startListening()
+  listening,     // Mic is open, words flowing in
+  processing,    // Got final transcript, pipeline is working on it
+  error,         // Something went wrong
+}
 
 class VoiceService extends ChangeNotifier {
-  // ── Vosk internals ──────────────────────────────────────────────
-  VoskFlutterPlugin? _vosk;
-  Model? _model;
-  SpeechService? _speechService;
+  // ── Core STT engine ─────────────────────────────────────────────
+  // SpeechToText wraps Android's SpeechRecognizer (Google Assistant engine)
+  // Must be initialized once, then listen() called each session.
+  final SpeechToText _speech = SpeechToText();
 
   // ── State ────────────────────────────────────────────────────────
   VoiceState _state = VoiceState.idle;
   VoiceState get state => _state;
+  bool get isListening => _state == VoiceState.listening;
+  bool get isReady => _state == VoiceState.ready;
 
+  // Live partial transcript shown in the overlay UI
   String _partialText = '';
   String get partialText => _partialText;
 
-  String _finalText = '';
-  String get finalText => _finalText;
-
-  double _downloadProgress = 0;
-  double get downloadProgress => _downloadProgress;
+  // Error message for UI display
+  String? _errorMessage;
+  String? get errorMessage => _errorMessage;
 
   // ── Streams ──────────────────────────────────────────────────────
-  // Emit the final committed transcript when ready to send to backend
-  final _finalResultController = StreamController<String>.broadcast();
-  Stream<String> get onFinalTranscript => _finalResultController.stream;
+  // Downstream consumers (ListeningProvider) subscribe to these.
 
-  // Emit partial text for live UI update
+  // Emits live partial words as user speaks
   final _partialController = StreamController<String>.broadcast();
   Stream<String> get onPartialText => _partialController.stream;
 
-  // ── Silence detection ────────────────────────────────────────────
-  // Vosk's onResult() fires when it detects a natural speech pause.
-  // We use that as our "user finished speaking" trigger.
-  // Additionally we keep a safety timer: if 3 seconds pass with no
-  // new partial result, we force-stop.
-  Timer? _silenceTimer;
-  static const _silenceTimeout = Duration(seconds: 3);
-  DateTime? _lastPartialTime;
+  // Emits the committed final transcript when user stops speaking
+  final _finalController = StreamController<String>.broadcast();
+  Stream<String> get onFinalTranscript => _finalController.stream;
 
-  // ── Subscriptions ────────────────────────────────────────────────
-  StreamSubscription? _partialSub;
-  StreamSubscription? _resultSub;
+  // ── Locale ───────────────────────────────────────────────────────
+  // Default Indian English. Switch to hi-IN / ta-IN in settings.
+  String _localeId = 'en_IN';
+  String get localeId => _localeId;
 
   // ─────────────────────────────────────────────────────────────────
-  // INIT: Download model on first launch, then init Vosk
+  // INITIALIZE — call once at app startup in main.dart
+  // No model download needed — Google engine is pre-installed on device.
   // ─────────────────────────────────────────────────────────────────
-  Future<void> initialize() async {
-    if (_state != VoiceState.idle && _state != VoiceState.error) return;
+  Future<bool> initialize() async {
+    if (_state == VoiceState.ready) return true;
+    if (_state == VoiceState.initializing) return false;
+
     _setState(VoiceState.initializing);
 
-    try {
-      // 1. Check mic permission
-      final micStatus = await Permission.microphone.request();
-      if (!micStatus.isGranted) {
-        _setState(VoiceState.error);
-        return;
-      }
-
-      // 2. Load model
-      _vosk = VoskFlutterPlugin.instance();
-      
-      // Cleanup any previous instance if it exists (prevents INITIALIZE_FAIL)
-      if (_speechService != null) {
-        try {
-          await _speechService!.stop();
-        } catch (_) {}
-        _speechService = null;
-      }
-
-      final modelPath = await _getOrDownloadModel();
-      if (modelPath == null) {
-        _setState(VoiceState.error);
-        return;
-      }
-
-      // 3. Create model and recognizer
-      _model = await _vosk!.createModel(modelPath);
-      final recognizer = await _vosk!.createRecognizer(
-        model: _model!,
-        sampleRate: 16000,
-      );
-
-      // 4. Init speech service (manages mic input automatically on Android)
-      final speechService = await _vosk!.initSpeechService(recognizer);
-      if (speechService == null) {
-        debugPrint('[VoiceService] failed to initialize SpeechService');
-        _setState(VoiceState.error);
-        return;
-      }
-      _speechService = speechService;
-
-      _setState(VoiceState.ready);
-    } catch (e) {
-      debugPrint('[VoiceService] init error: $e');
-      _setState(VoiceState.error);
+    // 1. Check microphone permission
+    final micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted) {
+      _setError('Microphone permission denied. Please allow it in Settings.');
+      return false;
     }
+
+    // 2. Initialize the Google STT engine
+    //    onStatus: called when the engine status changes (e.g. "listening", "done")
+    //    onError:  called on recognition errors
+    final available = await _speech.initialize(
+      onStatus: _onStatus,
+      onError: _onError,
+      debugLogging: kDebugMode,
+    );
+
+    if (!available) {
+      _setError(
+        'Speech recognition not available on this device. '
+        'Please install Google app or check device settings.',
+      );
+      return false;
+    }
+
+    _setState(VoiceState.ready);
+    debugPrint('[VoiceService] initialized, Google STT ready');
+    return true;
   }
 
   // ─────────────────────────────────────────────────────────────────
   // START LISTENING
+  // Opens the microphone and begins feeding audio to Google STT.
+  // Partial results update live. Final result fires when user pauses.
   // ─────────────────────────────────────────────────────────────────
   Future<void> startListening() async {
-    if (_speechService == null || _state != VoiceState.ready) {
-      debugPrint('[VoiceService] not ready, state=$_state');
+    if (!_speech.isAvailable) {
+      debugPrint('[VoiceService] not available, initializing...');
+      final ok = await initialize();
+      if (!ok) return;
+    }
+
+    if (_speech.isListening) {
+      debugPrint('[VoiceService] already listening, ignoring');
       return;
     }
 
-    // Reset state
+    // Reset partial text
     _partialText = '';
-    _finalText = '';
-    _lastPartialTime = DateTime.now();
+    _errorMessage = null;
     notifyListeners();
 
-    // ── Subscribe to partial results ─────────────────────────────
-    // onPartial() fires frequently as words are recognized.
-    // We use it to update the live transcript on screen.
-    _partialSub = _speechService!.onPartial().listen((json) {
-      try {
-        final data = jsonDecode(json);
-        final partial = (data['partial'] as String? ?? '').trim();
-
-        // Vosk uses 'nun' as a filler for empty — ignore it
-        if (partial.isEmpty || partial == 'nun') return;
-
-        _partialText = partial;
-        _lastPartialTime = DateTime.now();
-        _partialController.add(partial);
-        notifyListeners();
-
-        // Reset silence timer on each new word
-        _resetSilenceTimer();
-      } catch (_) {}
-    });
-
-    // ── Subscribe to result (fires on natural speech pause) ───────
-    // This is Vosk's built-in silence detection.
-    // When Vosk detects a pause in speech, onResult() fires with the
-    // best transcription so far. This is our PRIMARY trigger to stop.
-    _resultSub = _speechService!.onResult().listen((json) {
-      try {
-        final data = jsonDecode(json);
-        // Result JSON has key 'text' on Android
-        final text = (data['text'] as String? ?? '').trim();
-
-        if (text.isNotEmpty) {
-          debugPrint('[VoiceService] onResult fired: "$text"');
-          _finalText = text;
-          // Stop listening and emit the final result
-          _commitFinalResult(text);
-        }
-      } catch (_) {}
-    });
-
-    // ── Start the Vosk service (opens mic + begins feeding audio) ──
-    await _speechService!.start();
     _setState(VoiceState.listening);
 
-    // Start silence safety timer
-    _resetSilenceTimer();
+    await _speech.listen(
+      // ── onResult: fires on EVERY update — both partial and final ──
+      // result.finalResult == false → partial word stream (update UI)
+      // result.finalResult == true  → user stopped speaking (commit)
+      onResult: _onResult,
+
+      // ── Locale: Indian English by default ─────────────────────────
+      localeId: _localeId,
+
+      // ── partialResults: true → get live word updates ──────────────
+      // This is what makes the text appear in real-time on screen.
+      // Google STT fires onResult every ~300ms with the current best guess.
+      listenOptions: SpeechListenOptions(
+        partialResults: true,
+
+        // listenMode.dictation: optimized for natural speech phrases,
+        // not just single words. Best for commands like
+        // "Send a WhatsApp to Ravi saying I'll be late".
+        listenMode: ListenMode.dictation,
+
+        // cancelOnError: if a non-permanent error occurs, stop gracefully
+        cancelOnError: false,
+
+        // autoPunctuation: Google adds commas/periods automatically
+        autoPunctuation: false,
+
+        // onDevice: false = use cloud (best accuracy for Indian accents)
+        // true = force offline (less accurate but works without internet)
+        onDevice: false,
+      ),
+
+      // ── pauseFor: how long to wait after user stops speaking ───────
+      // Google STT auto-stops after this duration of silence.
+      // 2.5s is good for elderly users who speak slowly.
+      pauseFor: const Duration(seconds: 3),
+
+      // ── listenFor: absolute max duration of one session ────────────
+      listenFor: const Duration(seconds: 30),
+
+      // ── soundLevel: for waveform animation in the UI ──────────────
+      onSoundLevelChange: (level) {
+        // level is -160 to 0 (dB). Normalize to 0..1 for animation.
+        // You can connect this to the waveform widget if needed.
+      },
+    );
+
+    debugPrint('[VoiceService] listen() called, waiting for speech...');
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // SILENCE TIMER — safety fallback if onResult() doesn't fire
-  // ─────────────────────────────────────────────────────────────────
-  void _resetSilenceTimer() {
-    _silenceTimer?.cancel();
-    _silenceTimer = Timer(_silenceTimeout, () {
-      if (_state == VoiceState.listening) {
-        final text = _partialText.trim();
-        debugPrint('[VoiceService] silence timer fired, partial="$text"');
-        if (text.isNotEmpty) {
-          _commitFinalResult(text);
-        } else {
-          // Nothing was said — just stop quietly
-          stopListening();
-        }
-      }
-    });
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  // COMMIT FINAL RESULT — stop mic, emit transcript
-  // ─────────────────────────────────────────────────────────────────
-  void _commitFinalResult(String text) {
-    if (_state != VoiceState.listening) return;
-    _setState(VoiceState.processing);
-    _silenceTimer?.cancel();
-
-    // Stop the Vosk service (releases mic)
-    _speechService?.stop();
-    _cancelSubscriptions();
-
-    // Emit the final transcript to anyone listening
-    _finalResultController.add(text);
-    notifyListeners();
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  // STOP LISTENING (manual cancel by user)
+  // STOP LISTENING (manual cancel by user tapping X)
   // ─────────────────────────────────────────────────────────────────
   Future<void> stopListening() async {
-    _silenceTimer?.cancel();
-    _cancelSubscriptions();
-    await _speechService?.stop();
+    if (_speech.isListening) {
+      await _speech.stop();
+    }
     _partialText = '';
     _setState(VoiceState.ready);
   }
 
-  // Reset state to ready after processing is done
+  // ─────────────────────────────────────────────────────────────────
+  // MARK PROCESSING DONE — called by ListeningProvider after
+  // it finishes handling the intent (action executed or cancelled)
+  // ─────────────────────────────────────────────────────────────────
   void markProcessingDone() {
     if (_state == VoiceState.processing) {
       _setState(VoiceState.ready);
@@ -223,65 +186,123 @@ class VoiceService extends ChangeNotifier {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // MODEL LOADER
+  // UPDATE LOCALE — called from settings when user changes language
   // ─────────────────────────────────────────────────────────────────
-  Future<String?> _getOrDownloadModel() async {
-    final appDir = await getApplicationDocumentsDirectory();
-    final modelDir = Directory('${appDir.path}/vosk-model-small-en-in-0.4');
+  void setLocale(String localeId) {
+    _localeId = localeId;
+    debugPrint('[VoiceService] locale set to $_localeId');
+  }
 
-    if (modelDir.existsSync()) {
-      // Robust check: Ensure essential files exist (Vosk models must have 'am' and 'conf' folders)
-      final amDir = Directory('${modelDir.path}/am');
-      if (amDir.existsSync()) {
-        debugPrint('[VoiceService] model exists and appears valid');
-        await _optimizeModelConfig(modelDir.path);
-        return modelDir.path;
-      } else {
-        debugPrint('[VoiceService] model directory exists but is incomplete. Deleting...');
-        modelDir.deleteSync(recursive: true);
-      }
-    }
+  // ─────────────────────────────────────────────────────────────────
+  // PRIVATE: onResult callback
+  //
+  // This is the heart of the pipeline.
+  // Google STT calls this:
+  //   - Frequently with partialResults (live words as you speak)
+  //   - Once with finalResult=true when you stop speaking
+  // ─────────────────────────────────────────────────────────────────
+  void _onResult(SpeechRecognitionResult result) {
+    final words = result.recognizedWords.trim();
 
-    // Download the model
-    debugPrint('[VoiceService] downloading model...');
-    try {
-      final zipPath = await ModelLoader().loadFromNetwork(
-        'https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip',
-      );
-      // ModelLoader extracts and returns the path to the model directory
-      final path = zipPath;
-      if (path != null) {
-        await _optimizeModelConfig(path);
-      }
-      return path;
-    } catch (e) {
-      debugPrint('[VoiceService] download failed: $e');
-      return null;
+    if (words.isEmpty) return;
+
+    debugPrint(
+      '[VoiceService] onResult: "$words" | final=${result.finalResult}',
+    );
+
+    if (!result.finalResult) {
+      // ── Partial result: update the live text on screen ─────────
+      _partialText = words;
+      _partialController.add(words);
+      notifyListeners();
+    } else {
+      // ── FINAL RESULT: user stopped speaking ──────────────────
+      // This is the trigger to send data to the backend.
+      _partialText = words;
+      notifyListeners();
+
+      _setState(VoiceState.processing);
+
+      // Emit the final transcript to ListeningProvider
+      _finalController.add(words);
+
+      debugPrint('[VoiceService] FINAL TRANSCRIPT emitted: "$words"');
     }
   }
 
-  Future<void> _optimizeModelConfig(String modelPath) async {
-    try {
-      final confFile = File('$modelPath/conf/model.conf');
-      if (confFile.existsSync()) {
-        String content = await confFile.readAsString();
-        
-        // Check if we've already optimized it
-        if (content.contains('--endpoint.rule2.min-trailing-silence=2.0')) return;
+  // ─────────────────────────────────────────────────────────────────
+  // PRIVATE: statusListener callback
+  //
+  // Google STT fires these status strings:
+  //   "listening"      → mic is open and active
+  //   "notListening"   → mic closed (user stopped or timeout)
+  //   "done"           → session fully complete
+  //
+  // "done" fires AFTER onResult with finalResult=true.
+  // We use it as a safety net to reset state if processing got stuck.
+  // ─────────────────────────────────────────────────────────────────
+  void _onStatus(String status) {
+    debugPrint('[VoiceService] status: $status');
 
-        // Append custom endpointing rules to make it wait longer (more "loose")
-        final optimizations = """
-# Optimized for elderly users (longer pauses allowed)
---endpoint.rule2.min-trailing-silence=2.0
---endpoint.rule3.min-trailing-silence=3.0
---endpoint.rule4.min-trailing-silence=4.0
-""";
-        await confFile.writeAsString('$content\n$optimizations');
-        debugPrint('[VoiceService] Optimized model.conf for longer pauses');
-      }
-    } catch (e) {
-      debugPrint('[VoiceService] Failed to optimize config: $e');
+    switch (status) {
+      case 'listening':
+        // Already set to listening in startListening() — no-op here
+        break;
+
+      case 'notListening':
+        // Mic closed. If we're still in listening state (no final result
+        // came through), it means silence timeout with nothing said.
+        if (_state == VoiceState.listening) {
+          _setState(VoiceState.ready);
+          debugPrint('[VoiceService] timeout — nothing heard');
+        }
+        break;
+
+      case 'done':
+        // Session complete. If we're stuck in listening (edge case),
+        // reset to ready. Normal flow: already in processing state here.
+        if (_state == VoiceState.listening) {
+          _setState(VoiceState.ready);
+        }
+        break;
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // PRIVATE: errorListener callback
+  //
+  // Common errors from Google STT:
+  //   error_no_match        → didn't recognize any speech
+  //   error_speech_timeout  → silence timeout before any speech
+  //   error_network         → no internet (for cloud mode)
+  //   error_network_timeout → API timeout
+  // ─────────────────────────────────────────────────────────────────
+  void _onError(SpeechRecognitionError error) {
+    debugPrint('[VoiceService] error: ${error.errorMsg}, permanent=${error.permanent}');
+
+    // Non-permanent errors (like error_no_match) are normal — user just
+    // didn't say anything recognizable. Reset to ready silently.
+    if (!error.permanent) {
+      if (_state == VoiceState.listening) {
+        _setState(VoiceState.ready);
+      }
+      return;
+    }
+
+    // Permanent errors need user attention
+    String message;
+    switch (error.errorMsg) {
+      case 'error_network':
+      case 'error_network_timeout':
+        message = 'No internet. Please connect to WiFi for best accuracy.';
+        break;
+      case 'error_insufficient_permissions':
+        message = 'Microphone permission denied. Please allow it in Settings.';
+        break;
+      default:
+        message = 'Voice recognition error. Please try again.';
+    }
+    _setError(message);
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -292,20 +313,18 @@ class VoiceService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _cancelSubscriptions() {
-    _partialSub?.cancel();
-    _partialSub = null;
-    _resultSub?.cancel();
-    _resultSub = null;
+  void _setError(String message) {
+    _errorMessage = message;
+    _state = VoiceState.error;
+    notifyListeners();
+    debugPrint('[VoiceService] ERROR: $message');
   }
 
   @override
   void dispose() {
-    _silenceTimer?.cancel();
-    _cancelSubscriptions();
-    _finalResultController.close();
     _partialController.close();
-    _speechService?.stop();
+    _finalController.close();
+    _speech.stop();
     super.dispose();
   }
 }

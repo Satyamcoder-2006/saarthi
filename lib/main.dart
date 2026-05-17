@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:provider/provider.dart';
 
 import 'core/services/storage_service.dart';
 import 'core/services/voice_service.dart';
@@ -16,65 +16,68 @@ import 'app.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Local storage
   await Hive.initFlutter();
 
-  // Create services
+  // Services — created here, shared via Provider
   final storageService = StorageService();
   await storageService.initialize();
 
-  final ttsService = TtsService();
-  await ttsService.initialize();
+  final tts = TtsService();
+  await tts.initialize();
 
-  final apiService = ApiService();
-  await apiService.initialize();
+  final api = ApiService();
+  await api.initialize(); // reads IP from SharedPreferences
 
-  final voiceService = VoiceService();
-  // Initialize voice service early so model is ready
-  // This downloads model if first launch
-  voiceService.initialize(); // non-blocking, state tracked internally
+  // VoiceService: don't call initialize() here.
+  // It will be called on first tap of the mic button.
+  // This avoids showing a permission dialog on launch.
+  final voice = VoiceService();
 
   runApp(
     MultiProvider(
       providers: [
-        Provider.value(value: storageService),
-        ChangeNotifierProvider.value(value: voiceService),
-        Provider.value(value: apiService),
-        Provider.value(value: ttsService),
-        ChangeNotifierProvider(
+        Provider<StorageService>.value(value: storageService),
+        ChangeNotifierProvider<VoiceService>.value(value: voice),
+        Provider<ApiService>.value(value: api),
+        Provider<TtsService>.value(value: tts),
+        // ListeningProvider wires everything together
+        ChangeNotifierProvider<ListeningProvider>(
           create: (_) => ListeningProvider(
-            voiceService: voiceService,
-            apiService: apiService,
-            ttsService: ttsService,
+            voiceService: voice,
+            apiService: api,
+            ttsService: tts,
             storageService: storageService,
           ),
         ),
-        ChangeNotifierProvider(
+        ChangeNotifierProvider<SettingsProvider>(
           create: (_) => SettingsProvider(
             storageService: storageService,
-            ttsService: ttsService,
+            ttsService: tts,
           ),
         ),
-        ChangeNotifierProvider(
+        ChangeNotifierProvider<HomeProvider>(
           create: (_) => HomeProvider(
-            apiService: apiService,
-            voiceService: voiceService,
-            ttsService: ttsService,
+            apiService: api,
+            voiceService: voice,
+            ttsService: tts,
           ),
         ),
-        ChangeNotifierProvider(
+        ChangeNotifierProvider<ContactsProvider>(
           create: (_) => ContactsProvider(
-            apiService: apiService,
+            apiService: api,
             storageService: storageService,
           ),
         ),
-        ChangeNotifierProvider(
+        ChangeNotifierProvider<RemindersProvider>(
           create: (_) => RemindersProvider(
             storageService: storageService,
           ),
         ),
-        ChangeNotifierProvider(
+        ChangeNotifierProvider<HistoryProvider>(
           create: (_) => HistoryProvider(
-            apiService: apiService,
+            apiService: api,
             storageService: storageService,
           ),
         ),
